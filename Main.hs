@@ -6,6 +6,8 @@
 {-# LANGUAGE NumDecimals #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module Main where
 
@@ -89,7 +91,9 @@ data Moment = Moment
   }
   deriving (Show)
 
-newtype Millis = Millis Int deriving (Show)
+newtype Millis = Millis Int 
+    deriving stock(Show)
+    deriving newtype (Eq,Ord,Enum,Num,Real,Integral) 
 
 toMillis :: Moment -> Millis
 toMillis (Moment {hours,minutes,seconds,millis}) = Millis $
@@ -144,41 +148,36 @@ renderMoment (Moment {hours, minutes, seconds, millis}) =
     <> singleton ','
     <> fromString (printf "%03d" millis)
 
+parseSubtitleFile :: FilePath -> IO [Subtitle (Pair Moment)]
+parseSubtitleFile file = do
+    sourceText <- decodeUtf8 <$> B.readFile file
+    let r = runParser subtitlesParser file sourceText
+    case r of
+        Left err -> throwIO err
+        Right subtitles -> pure subtitles
+
 main :: IO ()
 main = do
   [source, rule, dest] <- getArgs
-  sourceText <- do
-    bytes <- B.readFile source
-    pure $ decodeUtf8 bytes
-  let parseResult = runParser subtitlesParser source sourceText
-  case parseResult of
-    Left err -> print err
-    Right subtitles -> do
-      ruleText <- do
-        bytes <- B.readFile rule
-        pure $ decodeUtf8 bytes
-      let ruleResult = runParser subtitlesParser rule ruleText
-      case ruleResult of
-        Left err -> print err
-        Right (rsub1 : rsub2 : _) -> do
-          let adjusted = adjust (fmap (fmap (fmap toMillis)) subtitles) (fmap (fmap toMillis) rsub1) (fmap (fmap toMillis) rsub2)
-              renderedResult = renderManySubtitles $ fmap (fmap (fmap toMoment)) adjusted
-          -- Data.Text.Lazy.IO.putStr (toLazyText renderedResult)
-          Data.ByteString.Lazy.writeFile dest (Data.Text.Lazy.Encoding.encodeUtf8 (toLazyText renderedResult))
+  subtitles <- parseSubtitleFile source
+  (rsub1 : rsub2 : _) <- parseSubtitleFile rule
+  let adjusted = adjust (fmap (fmap (fmap toMillis)) subtitles) (fmap (fmap toMillis) rsub1) (fmap (fmap toMillis) rsub2)
+      renderedResult = renderManySubtitles $ fmap (fmap (fmap toMoment)) adjusted
+  Data.ByteString.Lazy.writeFile dest (Data.Text.Lazy.Encoding.encodeUtf8 (toLazyText renderedResult))
 
 adjust :: [Subtitle (Pair Millis)] -> Subtitle (Pair Millis) -> Subtitle (Pair Millis) -> [Subtitle (Pair Millis)]
-adjust subs rule1@(Subtitle {subtitleInterval = Pair (Millis ruleStart) _}) 
-            rule2@(Subtitle {subtitleInterval = Pair (Millis ruleEnd) _})  = 
+adjust subs rule1@(Subtitle {subtitleInterval = Pair ruleStart _}) 
+            rule2@(Subtitle {subtitleInterval = Pair ruleEnd _})  = 
     let subsById = subtitleMap subs 
-        Just (Subtitle {subtitleInterval = Pair (Millis origStart) _}) = M.lookup (subtitleId rule1) subsById
-        Just (Subtitle {subtitleInterval = Pair (Millis origEnd) _}) = M.lookup (subtitleId rule2) subsById
+        Just (Subtitle {subtitleInterval = Pair origStart _}) = M.lookup (subtitleId rule1) subsById
+        Just (Subtitle {subtitleInterval = Pair origEnd _}) = M.lookup (subtitleId rule2) subsById
         origDx = origEnd - origStart
         ruleDx = ruleEnd - ruleStart
         displacement = ruleStart - origStart
         increment :: Rational = toRational ruleDx / toRational origDx
-        adjustOne one@(Subtitle {subtitleInterval = Pair (Millis oneStart) (Millis oneEnd)}) =
+        adjustOne one@(Subtitle {subtitleInterval = Pair oneStart oneEnd}) =
             let width = oneEnd - oneStart
                 remap :: Rational = toRational (oneStart - origStart) * increment + toRational origStart + toRational displacement
-             in one { subtitleInterval = Pair (Millis $ round remap) (Millis $ round remap + width) }
+             in one { subtitleInterval = Pair (Millis $ round remap) ((Millis $ round remap) + width) }
      in adjustOne <$> subs
 
